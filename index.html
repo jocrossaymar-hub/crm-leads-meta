@@ -6,6 +6,7 @@
 <title>CRM Leads Meta Ads - Voe Comunicação</title>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
   :root {
     --navy: #0b1e3d;
@@ -234,10 +235,18 @@
   <div class="operator-tabs" id="operatorTabs">
     <!-- populated by JS -->
   </div>
-  <div style="display:flex; gap:8px;">
+  <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+    <div style="display:flex; align-items:center; gap:6px; font-size:12px; color:#555;">
+      <label>De: <input type="date" id="filterDateFrom" style="padding:5px 8px; border:1px solid var(--border); border-radius:6px; font-size:12px;"></label>
+      <label>Até: <input type="date" id="filterDateTo" style="padding:5px 8px; border:1px solid var(--border); border-radius:6px; font-size:12px;"></label>
+      <button class="btn-gray" id="btnClearDateFilter" style="padding:5px 10px; font-size:11px;">Limpar</button>
+    </div>
+    <button class="btn-gray" id="btnImportExcel">📊 Importar planilha</button>
     <button class="btn-green" id="btnSync">🔄 Sincronizar leads</button>
+    <span id="lastSyncLabel" style="font-size:11px; color:var(--text-light);"></span>
   </div>
 </div>
+<input type="file" id="excelFileInput" accept=".xlsx,.xls,.csv" style="display:none;">
 
 <div class="board-wrap">
   <div class="board" id="board"></div>
@@ -335,11 +344,11 @@
     <div class="field">
       <label>Por que este lead foi perdido?</label>
       <select id="lostReasonSelect">
-        <option value="Não respondeu">Não respondeu</option>
-        <option value="Preço muito alto">Preço muito alto</option>
-        <option value="Fechou com concorrente">Fechou com concorrente</option>
-        <option value="Não é o perfil do produto">Não é o perfil do produto</option>
-        <option value="Desistiu / sem interesse">Desistiu / sem interesse</option>
+        <option value="Sem interesse">Sem interesse</option>
+        <option value="Preço">Preço</option>
+        <option value="Inválido">Inválido</option>
+        <option value="Fora da área de cobertura">Fora da área de cobertura</option>
+        <option value="Sem resposta">Sem resposta</option>
         <option value="Outro">Outro</option>
       </select>
     </div>
@@ -350,6 +359,41 @@
     <div class="modal-actions">
       <button class="btn-gray" id="cancelLost">Cancelar</button>
       <button class="btn-danger" id="confirmLost">Confirmar perda</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: Importar planilha -->
+<div class="modal-overlay" id="modalImport">
+  <div class="modal">
+    <h2>Importar leads de planilha</h2>
+    <div class="field">
+      <label>Operadora dos leads importados</label>
+      <select id="importOperator"></select>
+    </div>
+    <div class="field">
+      <label>Etapa inicial</label>
+      <select id="importStage"></select>
+    </div>
+    <div id="importPreviewWrap" style="display:none;">
+      <div class="hint" style="margin-bottom:8px;">Mapeie as colunas da sua planilha para os campos do CRM:</div>
+      <div class="field">
+        <label>Coluna do Nome</label>
+        <select id="mapName"></select>
+      </div>
+      <div class="field">
+        <label>Coluna do Telefone</label>
+        <select id="mapPhone"></select>
+      </div>
+      <div class="field">
+        <label>Coluna do E-mail</label>
+        <select id="mapEmail"></select>
+      </div>
+      <div class="hint" id="importCount"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-gray" id="closeImport">Cancelar</button>
+      <button class="btn-green" id="confirmImport" style="display:none;">Importar leads</button>
     </div>
   </div>
 </div>
@@ -448,9 +492,20 @@ function renderBoard() {
 
   if (stages.length === 0) return;
 
-  const filteredLeads = activeOperatorId === 'all'
+  let filteredLeads = activeOperatorId === 'all'
     ? leads
     : leads.filter(l => l.operatorId === activeOperatorId);
+
+  const dateFrom = document.getElementById('filterDateFrom').value;
+  const dateTo = document.getElementById('filterDateTo').value;
+  if (dateFrom) {
+    const fromTs = new Date(dateFrom + 'T00:00:00').getTime();
+    filteredLeads = filteredLeads.filter(l => (l.createdAt || 0) >= fromTs);
+  }
+  if (dateTo) {
+    const toTs = new Date(dateTo + 'T23:59:59').getTime();
+    filteredLeads = filteredLeads.filter(l => (l.createdAt || 0) <= toTs);
+  }
 
   stages.sort((a,b) => a.order - b.order).forEach(stage => {
     const col = document.createElement('div');
@@ -717,10 +772,118 @@ document.getElementById('deleteLead').addEventListener('click', () => {
     .catch(err => toast('Erro: ' + err.message, true));
 });
 
+/* ======================= DATE FILTER ======================= */
+document.getElementById('filterDateFrom').addEventListener('change', renderBoard);
+document.getElementById('filterDateTo').addEventListener('change', renderBoard);
+document.getElementById('btnClearDateFilter').addEventListener('click', () => {
+  document.getElementById('filterDateFrom').value = '';
+  document.getElementById('filterDateTo').value = '';
+  renderBoard();
+});
+
+/* ======================= EXCEL IMPORT ======================= */
+let importedRows = [];
+let importedHeaders = [];
+
+document.getElementById('btnImportExcel').addEventListener('click', () => {
+  if (operators.length === 0) { toast('Cadastre uma operadora antes de importar', true); return; }
+  populateImportSelects();
+  document.getElementById('importPreviewWrap').style.display = 'none';
+  document.getElementById('confirmImport').style.display = 'none';
+  document.getElementById('modalImport').classList.add('open');
+});
+document.getElementById('closeImport').addEventListener('click', () => {
+  document.getElementById('modalImport').classList.remove('open');
+});
+
+function populateImportSelects() {
+  document.getElementById('importOperator').innerHTML = operators.map(op => `<option value="${op.id}">${escapeHtml(op.name)}</option>`).join('');
+  document.getElementById('importStage').innerHTML = stages.sort((a,b)=>a.order-b.order).map(s => `<option value="${s.name}">${escapeHtml(s.name)}</option>`).join('');
+}
+
+// Trigger file selection right after opening modal (operator/stage already have defaults)
+document.getElementById('btnImportExcel').addEventListener('click', () => {
+  setTimeout(() => document.getElementById('excelFileInput').click(), 300);
+});
+
+document.getElementById('excelFileInput').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (evt) => {
+    const data = new Uint8Array(evt.target.result);
+    const workbook = XLSX.read(data, { type: 'array' });
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+    if (rows.length < 2) { toast('Planilha vazia ou sem dados', true); return; }
+    importedHeaders = rows[0].map(h => String(h || '').trim());
+    importedRows = rows.slice(1).filter(r => r.some(cell => cell !== undefined && cell !== ''));
+
+    const colOptions = importedHeaders.map((h, i) => `<option value="${i}">${escapeHtml(h)}</option>`).join('');
+    document.getElementById('mapName').innerHTML = colOptions;
+    document.getElementById('mapPhone').innerHTML = colOptions;
+    document.getElementById('mapEmail').innerHTML = colOptions;
+
+    // try auto-guess columns
+    autoGuessColumn('mapName', ['nome', 'name']);
+    autoGuessColumn('mapPhone', ['telefone', 'phone', 'celular', 'whatsapp']);
+    autoGuessColumn('mapEmail', ['email', 'e-mail']);
+
+    document.getElementById('importPreviewWrap').style.display = 'block';
+    document.getElementById('importCount').textContent = `${importedRows.length} linha(s) detectada(s) na planilha.`;
+    document.getElementById('confirmImport').style.display = 'inline-block';
+  };
+  reader.readAsArrayBuffer(file);
+  e.target.value = '';
+});
+
+function autoGuessColumn(selectId, keywords) {
+  const idx = importedHeaders.findIndex(h => keywords.some(k => h.toLowerCase().includes(k)));
+  if (idx >= 0) document.getElementById(selectId).value = idx;
+}
+
+document.getElementById('confirmImport').addEventListener('click', async () => {
+  const operatorId = document.getElementById('importOperator').value;
+  const stage = document.getElementById('importStage').value;
+  const nameIdx = parseInt(document.getElementById('mapName').value);
+  const phoneIdx = parseInt(document.getElementById('mapPhone').value);
+  const emailIdx = parseInt(document.getElementById('mapEmail').value);
+
+  let count = 0;
+  for (const row of importedRows) {
+    const name = row[nameIdx] ? String(row[nameIdx]).trim() : '';
+    const phone = row[phoneIdx] ? String(row[phoneIdx]).trim() : '';
+    const email = row[emailIdx] ? String(row[emailIdx]).trim() : '';
+    if (!name && !phone && !email) continue;
+
+    await db.collection('leads').add({
+      operatorId,
+      name: name || 'Lead sem nome',
+      phone,
+      email,
+      stage,
+      note: '',
+      source: 'excel_import',
+      createdAt: Date.now()
+    });
+    count++;
+  }
+
+  document.getElementById('modalImport').classList.remove('open');
+  toast(`${count} lead(s) importado(s) da planilha!`);
+});
+
 /* ======================= SYNC WITH META GRAPH API ======================= */
-document.getElementById('btnSync').addEventListener('click', async () => {
-  const opsToSync = activeOperatorId === 'all' ? operators : operators.filter(o => o.id === activeOperatorId);
-  if (opsToSync.length === 0) { toast('Nenhuma operadora cadastrada para sincronizar', true); return; }
+document.getElementById('btnSync').addEventListener('click', () => runSync(true));
+
+async function runSync(manual) {
+  const opsToSync = manual && activeOperatorId !== 'all'
+    ? operators.filter(o => o.id === activeOperatorId)
+    : operators;
+  if (opsToSync.length === 0) {
+    if (manual) toast('Nenhuma operadora cadastrada para sincronizar', true);
+    return;
+  }
 
   let totalNew = 0;
   let totalErrors = 0;
@@ -771,12 +934,22 @@ document.getElementById('btnSync').addEventListener('click', async () => {
     }
   }
 
-  if (totalErrors > 0) {
-    toast(`Sincronizado com ${totalErrors} erro(s). ${totalNew} lead(s) novo(s) importado(s).`, totalNew === 0);
-  } else {
-    toast(`${totalNew} lead(s) novo(s) importado(s)!`);
+  const now = new Date();
+  document.getElementById('lastSyncLabel').textContent = `Última sincronização: ${now.toLocaleTimeString('pt-BR')}`;
+
+  if (manual) {
+    if (totalErrors > 0) {
+      toast(`Sincronizado com ${totalErrors} erro(s). ${totalNew} lead(s) novo(s) importado(s).`, totalNew === 0);
+    } else {
+      toast(`${totalNew} lead(s) novo(s) importado(s)!`);
+    }
+  } else if (totalNew > 0) {
+    toast(`Sincronização automática: ${totalNew} lead(s) novo(s)!`);
   }
-});
+}
+
+/* Sincronização automática a cada 5 minutos */
+setInterval(() => runSync(false), 5 * 60 * 1000);
 
 /* Close modals on overlay click */
 document.querySelectorAll('.modal-overlay').forEach(overlay => {
