@@ -227,6 +227,7 @@
   <div class="header-actions">
     <button class="btn-outline" id="btnOperators">⚙️ Operadoras</button>
     <button class="btn-outline" id="btnStages">📋 Etapas</button>
+    <button class="btn-outline" id="btnTrash">🗑️ Lixeira</button>
     <button class="btn-green" id="btnAddLead">+ Lead manual</button>
   </div>
 </header>
@@ -331,7 +332,7 @@
     </div>
     <div class="modal-actions">
       <button class="btn-gray" id="closeLead">Cancelar</button>
-      <button class="btn-danger" id="deleteLead" style="display:none;">Excluir</button>
+      <button class="btn-danger" id="deleteLead" style="display:none;">🗑️ Mover p/ lixeira</button>
       <button class="btn-green" id="saveLead">Salvar</button>
     </div>
   </div>
@@ -398,6 +399,18 @@
   </div>
 </div>
 
+<!-- Modal: Lixeira -->
+<div class="modal-overlay" id="modalTrash">
+  <div class="modal" style="max-width:600px;">
+    <h2>Lixeira de leads excluídos</h2>
+    <div class="hint" style="margin-bottom:12px;">Leads aqui podem ser restaurados ou excluídos definitivamente. Nada é apagado para sempre até você confirmar abaixo.</div>
+    <div id="trashList"></div>
+    <div class="modal-actions">
+      <button class="btn-gray" id="closeTrash">Fechar</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -417,6 +430,7 @@ const db = firebase.firestore();
 let operators = [];       // {id, name, color, token, formId}
 let stages = [];          // {id, name, order}
 let leads = [];           // {id, operatorId, name, phone, email, stage, note, lostReason, leadgenId, createdAt}
+let trashedLeads = [];    // leads com deleted=true
 let activeOperatorId = 'all';
 let draggedLeadId = null;
 
@@ -460,8 +474,14 @@ db.collection('stages').orderBy('order').onSnapshot(snap => {
 
 db.collection('leads').orderBy('createdAt', 'desc').onSnapshot(snap => {
   leads = [];
-  snap.forEach(doc => leads.push({ id: doc.id, ...doc.data() }));
+  trashedLeads = [];
+  snap.forEach(doc => {
+    const lead = { id: doc.id, ...doc.data() };
+    if (lead.deleted) trashedLeads.push(lead);
+    else leads.push(lead);
+  });
   renderBoard();
+  renderTrash();
 });
 
 /* ======================= OPERATOR TABS ======================= */
@@ -763,14 +783,64 @@ document.getElementById('saveLead').addEventListener('click', () => {
 
 document.getElementById('deleteLead').addEventListener('click', () => {
   const id = document.getElementById('leadId').value;
-  if (!id || !confirm('Excluir este lead permanentemente?')) return;
-  db.collection('leads').doc(id).delete()
+  if (!id || !confirm('Mover este lead para a lixeira? Você poderá restaurá-lo depois.')) return;
+  db.collection('leads').doc(id).update({ deleted: true, deletedAt: Date.now() })
     .then(() => {
       document.getElementById('modalLead').classList.remove('open');
-      toast('Lead excluído');
+      toast('Lead movido para a lixeira');
     })
     .catch(err => toast('Erro: ' + err.message, true));
 });
+
+/* ======================= TRASH (LIXEIRA) ======================= */
+document.getElementById('btnTrash').addEventListener('click', () => {
+  document.getElementById('modalTrash').classList.add('open');
+});
+document.getElementById('closeTrash').addEventListener('click', () => {
+  document.getElementById('modalTrash').classList.remove('open');
+});
+
+function renderTrash() {
+  const wrap = document.getElementById('trashList');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  if (trashedLeads.length === 0) {
+    wrap.innerHTML = '<div class="hint">A lixeira está vazia.</div>';
+    return;
+  }
+  trashedLeads
+    .sort((a,b) => (b.deletedAt || 0) - (a.deletedAt || 0))
+    .forEach(lead => {
+      const op = operators.find(o => o.id === lead.operatorId);
+      const item = document.createElement('div');
+      item.className = 'op-list-item';
+      const deletedDate = lead.deletedAt ? new Date(lead.deletedAt).toLocaleString('pt-BR') : '-';
+      item.innerHTML = `
+        <div>
+          <div class="op-name">${escapeHtml(lead.name || 'Sem nome')} ${op ? `<span class="tag">${escapeHtml(op.name)}</span>` : ''}</div>
+          <div class="hint">📞 ${escapeHtml(lead.phone || '-')} · Excluído em ${deletedDate}</div>
+        </div>
+        <div class="op-actions">
+          <button class="btn-green" onclick="restoreLead('${lead.id}')">Restaurar</button>
+          <button class="btn-danger" onclick="permanentDeleteLead('${lead.id}')">Excluir de vez</button>
+        </div>
+      `;
+      wrap.appendChild(item);
+    });
+}
+
+function restoreLead(id) {
+  db.collection('leads').doc(id).update({ deleted: false, deletedAt: firebase.firestore.FieldValue.delete() })
+    .then(() => toast('Lead restaurado!'))
+    .catch(err => toast('Erro: ' + err.message, true));
+}
+
+function permanentDeleteLead(id) {
+  if (!confirm('Excluir este lead PERMANENTEMENTE? Essa ação não pode ser desfeita.')) return;
+  db.collection('leads').doc(id).delete()
+    .then(() => toast('Lead excluído permanentemente'))
+    .catch(err => toast('Erro: ' + err.message, true));
+}
 
 /* ======================= DATE FILTER ======================= */
 document.getElementById('filterDateFrom').addEventListener('change', renderBoard);
