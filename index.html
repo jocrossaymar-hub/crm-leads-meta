@@ -335,6 +335,10 @@
       <label>Observações</label>
       <textarea id="leadNote" placeholder="Anotações sobre o lead..."></textarea>
     </div>
+    <div class="field" id="leadAnswersWrap" style="display:none;">
+      <label>Respostas do formulário</label>
+      <div id="leadAnswersList" style="font-size:12px; color:#444; background:#f7f8fa; border-radius:8px; padding:10px;"></div>
+    </div>
     <div class="modal-actions">
       <button class="btn-gray" id="closeLead">Cancelar</button>
       <button class="btn-danger" id="deleteLead" style="display:none;">🗑️ Mover p/ lixeira</button>
@@ -582,19 +586,25 @@ function renderBoard() {
         card.draggable = true;
         card.style.borderLeftColor = op?.color || '#1fae5f';
         card.dataset.leadId = lead.id;
+
+        const answerTags = formatAnswerTags(lead.rawFieldData);
+
         card.innerHTML = `
           <div class="lead-name">${escapeHtml(lead.name || 'Sem nome')}</div>
           <div class="lead-meta">📞 ${escapeHtml(lead.phone || '-')}</div>
           <div class="lead-meta">✉️ ${escapeHtml(lead.email || '-')}</div>
+          ${answerTags}
           <div class="lead-tags">
             ${op ? `<span class="tag">${escapeHtml(op.name)}</span>` : ''}
             ${lead.lostReason ? `<span class="tag" style="background:#fde8e7;color:#c0392b;">${escapeHtml(lead.lostReason)}</span>` : ''}
           </div>
-          <div class="lead-actions">
-            <button class="btn-gray" onclick="openEditLead('${lead.id}')">Editar</button>
-          </div>
         `;
-        card.addEventListener('dragstart', () => { draggedLeadId = lead.id; });
+        card.addEventListener('click', (e) => {
+          // evita abrir edição se o clique foi resultado de um drag (arrastar)
+          if (card.dataset.wasDragged === '1') { card.dataset.wasDragged = '0'; return; }
+          openEditLead(lead.id);
+        });
+        card.addEventListener('dragstart', () => { draggedLeadId = lead.id; card.dataset.wasDragged = '1'; });
         body.appendChild(card);
       });
     }
@@ -616,6 +626,14 @@ function escapeHtml(str) {
   const div = document.createElement('div');
   div.textContent = str;
   return div.innerHTML;
+}
+
+function formatAnswerTags(rawFieldData) {
+  if (!rawFieldData || Object.keys(rawFieldData).length === 0) return '';
+  const entries = Object.entries(rawFieldData);
+  return `<div class="lead-tags" style="margin-top:6px;">
+    ${entries.map(([k, v]) => `<span class="tag" style="background:#eaf3ff;color:#1a5fa8;">${escapeHtml(k)}: ${escapeHtml(v)}</span>`).join('')}
+  </div>`;
 }
 
 /* ======================= MOVE LEAD (drag & drop) ======================= */
@@ -789,6 +807,18 @@ function openEditLead(id) {
   document.getElementById('leadStage').value = lead.stage || stages[0]?.name || '';
   document.getElementById('leadNote').value = lead.note || '';
   document.getElementById('deleteLead').style.display = 'inline-block';
+
+  const answersWrap = document.getElementById('leadAnswersWrap');
+  const answersList = document.getElementById('leadAnswersList');
+  if (lead.rawFieldData && Object.keys(lead.rawFieldData).length > 0) {
+    answersList.innerHTML = Object.entries(lead.rawFieldData)
+      .map(([k, v]) => `<div style="margin-bottom:4px;"><strong>${escapeHtml(k)}:</strong> ${escapeHtml(v)}</div>`)
+      .join('');
+    answersWrap.style.display = 'block';
+  } else {
+    answersWrap.style.display = 'none';
+  }
+
   document.getElementById('modalLead').classList.add('open');
 }
 
@@ -1005,6 +1035,11 @@ async function runSync(manual) {
           const phoneIdx = headers.findIndex(h => h.includes('phone') || h.includes('telefone'));
           const emailIdx = headers.findIndex(h => h.includes('email'));
 
+          // Colunas técnicas/padrão do Meta que não são respostas do formulário
+          const knownIdx = new Set([idIdx, nameIdx, phoneIdx, emailIdx].filter(i => i >= 0));
+          const technicalCols = ['created_time', 'ad_id', 'adset_id', 'campaign_id', 'form_id', 'is_organic', 'platform', 'lead_status'];
+          const rawHeaders = rows[0]; // nomes originais (não lowercase) para exibir bonito
+
           for (let i = 1; i < rows.length; i++) {
             const row = rows[i];
             if (!row || row.every(c => !c)) continue;
@@ -1018,6 +1053,15 @@ async function runSync(manual) {
             const existing = leads.find(l => l.leadgenId === dedupeKey);
             if (existing) continue;
 
+            // Captura respostas customizadas do formulário (colunas que não são id/nome/telefone/email/técnicas)
+            const rawFieldData = {};
+            headers.forEach((h, idx) => {
+              if (knownIdx.has(idx)) return;
+              if (technicalCols.includes(h)) return;
+              const val = row[idx];
+              if (val) rawFieldData[rawHeaders[idx]] = val;
+            });
+
             await db.collection('leads').add({
               operatorId: op.id,
               name: name || 'Lead sem nome',
@@ -1027,6 +1071,7 @@ async function runSync(manual) {
               note: '',
               leadgenId: dedupeKey,
               source: 'sheet_sync',
+              rawFieldData,
               createdAt: Date.now()
             });
             totalNew++;
