@@ -1050,7 +1050,7 @@ async function runSync(manual) {
             if (!name && !phone && !email) continue;
 
             const dedupeKey = rowId || `${name}_${phone}_${email}`;
-            const existing = leads.find(l => l.leadgenId === dedupeKey);
+            const existing = [...leads, ...trashedLeads].find(l => l.leadgenId === dedupeKey);
             if (existing) continue;
 
             // Captura respostas customizadas do formulário (colunas que não são id/nome/telefone/email/técnicas)
@@ -1100,7 +1100,7 @@ async function runSync(manual) {
       const metaLeads = json.data || [];
       for (const ml of metaLeads) {
         // check duplicate
-        const existing = leads.find(l => l.leadgenId === ml.id);
+        const existing = [...leads, ...trashedLeads].find(l => l.leadgenId === ml.id);
         if (existing) continue;
 
         const fieldMap = {};
