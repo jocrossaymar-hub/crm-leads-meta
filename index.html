@@ -277,6 +277,11 @@
         <label>Form ID (Meta Lead Ads)</label>
         <input type="text" id="opFormId" placeholder="Ex: 123456789012345">
       </div>
+      <div class="field">
+        <label>Link da planilha (CSV publicado)</label>
+        <input type="text" id="opSheetUrl" placeholder="https://docs.google.com/spreadsheets/d/e/.../pub?output=csv">
+        <div class="hint">Cole aqui o link gerado em Arquivo → Compartilhar → Publicar na web (formato CSV). O CRM vai ler essa planilha automaticamente a cada sincronização.</div>
+      </div>
     </div>
     <div class="modal-actions">
       <button class="btn-gray" id="closeOperators">Fechar</button>
@@ -446,6 +451,30 @@ function toast(msg, isError=false) {
 
 function uid() {
   return Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
+}
+
+function parseCSV(text) {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    const next = text[i + 1];
+    if (inQuotes) {
+      if (char === '"' && next === '"') { field += '"'; i++; }
+      else if (char === '"') { inQuotes = false; }
+      else { field += char; }
+    } else {
+      if (char === '"') { inQuotes = true; }
+      else if (char === ',') { row.push(field); field = ''; }
+      else if (char === '\r') { /* ignore */ }
+      else if (char === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
+      else { field += char; }
+    }
+  }
+  if (field || row.length) { row.push(field); rows.push(row); }
+  return rows.filter(r => r.length > 1 || (r.length === 1 && r[0] !== ''));
 }
 
 /* ======================= FIRESTORE SYNC (realtime) ======================= */
@@ -653,14 +682,16 @@ document.getElementById('saveOperator').addEventListener('click', () => {
   const color = document.getElementById('opColor').value;
   const token = document.getElementById('opToken').value.trim();
   const formId = document.getElementById('opFormId').value.trim();
+  const sheetUrl = document.getElementById('opSheetUrl').value.trim();
 
   if (!name) { toast('Digite o nome da operadora', true); return; }
 
-  db.collection('operators').add({ name, color, token, formId, createdAt: Date.now() })
+  db.collection('operators').add({ name, color, token, formId, sheetUrl, createdAt: Date.now() })
     .then(() => {
       document.getElementById('opName').value = '';
       document.getElementById('opToken').value = '';
       document.getElementById('opFormId').value = '';
+      document.getElementById('opSheetUrl').value = '';
       toast('Operadora salva!');
     })
     .catch(err => toast('Erro: ' + err.message, true));
@@ -680,7 +711,9 @@ function editOperatorPrompt(id) {
   if (newToken === null) return;
   const newFormId = prompt('Novo Form ID (deixe igual se não quiser mudar):', op.formId || '');
   if (newFormId === null) return;
-  db.collection('operators').doc(id).update({ token: newToken, formId: newFormId })
+  const newSheetUrl = prompt('Novo link da planilha CSV (deixe igual se não quiser mudar):', op.sheetUrl || '');
+  if (newSheetUrl === null) return;
+  db.collection('operators').doc(id).update({ token: newToken, formId: newFormId, sheetUrl: newSheetUrl })
     .then(() => toast('Operadora atualizada'))
     .catch(err => toast('Erro: ' + err.message, true));
 }
@@ -959,6 +992,54 @@ async function runSync(manual) {
   let totalErrors = 0;
 
   for (const op of opsToSync) {
+    // Prioridade 1: planilha CSV publicada (não depende de token/App Review)
+    if (op.sheetUrl) {
+      try {
+        const csvRes = await fetch(op.sheetUrl + (op.sheetUrl.includes('?') ? '&' : '?') + 'cachebust=' + Date.now());
+        const csvText = await csvRes.text();
+        const rows = parseCSV(csvText);
+        if (rows.length > 1) {
+          const headers = rows[0].map(h => h.trim().toLowerCase());
+          const idIdx = headers.findIndex(h => h === 'id' || h.includes('lead_id') || h.includes('leadgen'));
+          const nameIdx = headers.findIndex(h => h.includes('full_name') || h.includes('nome') || h === 'name');
+          const phoneIdx = headers.findIndex(h => h.includes('phone') || h.includes('telefone'));
+          const emailIdx = headers.findIndex(h => h.includes('email'));
+
+          for (let i = 1; i < rows.length; i++) {
+            const row = rows[i];
+            if (!row || row.every(c => !c)) continue;
+            const rowId = idIdx >= 0 ? row[idIdx] : null;
+            const name = nameIdx >= 0 ? row[nameIdx] : '';
+            const phone = phoneIdx >= 0 ? row[phoneIdx] : '';
+            const email = emailIdx >= 0 ? row[emailIdx] : '';
+            if (!name && !phone && !email) continue;
+
+            const dedupeKey = rowId || `${name}_${phone}_${email}`;
+            const existing = leads.find(l => l.leadgenId === dedupeKey);
+            if (existing) continue;
+
+            await db.collection('leads').add({
+              operatorId: op.id,
+              name: name || 'Lead sem nome',
+              phone,
+              email,
+              stage: stages[0]?.name || 'Novo',
+              note: '',
+              leadgenId: dedupeKey,
+              source: 'sheet_sync',
+              createdAt: Date.now()
+            });
+            totalNew++;
+          }
+        }
+      } catch (err) {
+        console.error('Erro ao sincronizar planilha de', op.name, err);
+        totalErrors++;
+      }
+      continue; // se tem sheetUrl, não tenta Graph API também
+    }
+
+    // Prioridade 2: Graph API direta (requer token com leads_retrieval aprovado)
     if (!op.token || !op.formId) continue;
     try {
       const url = `https://graph.facebook.com/v20.0/${op.formId}/leads?access_token=${encodeURIComponent(op.token)}&limit=100`;
