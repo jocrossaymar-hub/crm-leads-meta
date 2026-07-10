@@ -1043,14 +1043,22 @@ async function runSync(manual) {
           for (let i = 1; i < rows.length; i++) {
             const row = rows[i];
             if (!row || row.every(c => !c)) continue;
-            const rowId = idIdx >= 0 ? row[idIdx] : null;
-            const name = nameIdx >= 0 ? row[nameIdx] : '';
-            const phone = phoneIdx >= 0 ? row[phoneIdx] : '';
-            const email = emailIdx >= 0 ? row[emailIdx] : '';
+            const rowId = idIdx >= 0 ? (row[idIdx] || '').trim() : '';
+            const name = (nameIdx >= 0 ? row[nameIdx] : '').trim();
+            const phone = (phoneIdx >= 0 ? row[phoneIdx] : '').trim();
+            const email = (emailIdx >= 0 ? row[emailIdx] : '').trim();
             if (!name && !phone && !email) continue;
 
-            const dedupeKey = rowId || `${name}_${phone}_${email}`;
-            const existing = [...leads, ...trashedLeads].find(l => l.leadgenId === dedupeKey);
+            const normComposite = `${name}|${phone}|${email}`.toLowerCase().replace(/\s+/g, '');
+            const dedupeKey = rowId || normComposite;
+
+            const allLeads = [...leads, ...trashedLeads];
+            const existing = allLeads.find(l => {
+              if (l.leadgenId && rowId && l.leadgenId === rowId) return true;
+              if (l.dedupeComposite && l.dedupeComposite === normComposite) return true;
+              const lComposite = `${l.name || ''}|${l.phone || ''}|${l.email || ''}`.toLowerCase().replace(/\s+/g, '');
+              return lComposite === normComposite;
+            });
             if (existing) continue;
 
             // Captura respostas customizadas do formulário (colunas que não são id/nome/telefone/email/técnicas)
@@ -1070,6 +1078,7 @@ async function runSync(manual) {
               stage: stages[0]?.name || 'Novo',
               note: '',
               leadgenId: dedupeKey,
+              dedupeComposite: normComposite,
               source: 'sheet_sync',
               rawFieldData,
               createdAt: Date.now()
